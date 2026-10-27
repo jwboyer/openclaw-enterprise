@@ -491,17 +491,15 @@ async function createFixture(context, options = {}) {
       gatewayApiKeyPath,
     };
   }
-  const app = await composePostgresDevelopment(
-    {
-      mode: "development",
-      host: "127.0.0.1",
-      databaseUrl,
-      authSecret,
-      authBaseURL: origin,
-      ...nativeAdminSettings,
-    },
-    drivers,
-  );
+  const settings = {
+    mode: "development",
+    host: "127.0.0.1",
+    databaseUrl,
+    authSecret,
+    authBaseURL: origin,
+    ...nativeAdminSettings,
+  };
+  let app = await composePostgresDevelopment(settings, drivers);
   const session = await signInToControllerApp(app, credentials, { origin });
 
   context.after(async () => {
@@ -630,6 +628,11 @@ async function createFixture(context, options = {}) {
     workerCompletion = undefined;
   }
 
+  async function restartApi() {
+    await app.close();
+    app = await composePostgresDevelopment(settings, drivers);
+  }
+
   // The signed-in administrator's Principal, whose subject is its account: a test may add
   // other administrators, so the first better-auth Principal is not necessarily this one.
   async function administratorPrincipalId() {
@@ -680,6 +683,7 @@ async function createFixture(context, options = {}) {
     pool,
     configurationDriver,
     revokeCurrentPrincipal,
+    restartApi,
     request,
     secretDriver,
     session,
@@ -1090,11 +1094,19 @@ test(
     assert.deepEqual(queued.plan.repositoryAccess, repositoryAccess);
     assert.deepEqual(queued.plan.pluginApprovers, []);
     assert.equal(queued.agent_id, null);
+    assert.equal(Object.hasOwn(queued.plan, "reservedAgentId"), false);
+    // Ordinary admission retains the pre-opt-in plan shape. Reopen the API before
+    // a new worker consumes it, without rewriting persisted work or signing in again.
+    await fixture.restartApi();
     const replay = await fixture.request("POST", `/namespaces/${namespace.id}/agents/provision`, {
       body,
     });
     assert.equal(replay.status, 202, JSON.stringify(replay.body));
     assert.equal(replay.data.provisioning.workId, admitted.data.provisioning.workId);
+    assert.deepEqual(
+      (await provisioningRow(fixture.pool, namespace.id, body.requestId)).plan,
+      queued.plan,
+    );
     const changed = await fixture.request("POST", `/namespaces/${namespace.id}/agents/provision`, {
       body: { ...body, repositoryAccess: { ...repositoryAccess, defaultProfile: "git-write" } },
     });
@@ -1148,6 +1160,15 @@ test(
     assert.equal(revisions.length, 1);
     assert.equal(revisions[0].id, status.revisionId);
     assert.equal(revisions[0].configurationGeneration, 1);
+    await fixture.restartApi();
+    const restartedReplay = await fixture.request(
+      "POST",
+      `/namespaces/${namespace.id}/agents/provision`,
+      { body },
+    );
+    assert.equal(restartedReplay.status, 202, JSON.stringify(restartedReplay.body));
+    assert.equal(restartedReplay.data.provisioning.agentId, status.agentId);
+    assert.equal(restartedReplay.data.provisioning.revisionId, status.revisionId);
     assert.deepEqual(revisions[0].pluginApprovers, []);
     const agentPath = `/namespaces/${namespace.id}/agents/${status.agentId}`;
     const agent = await fixture.request("GET", agentPath);
@@ -6009,8 +6030,18 @@ test(
       undefined,
       "reserved identity is not a created Agent",
     );
+    const queued = await provisioningRow(fixture.pool, namespace.id, body.requestId);
+    assert.match(queued.plan.reservedAgentId, identifier("agt"));
+    // The reserved identity and prepared policy must survive API restart before
+    // the first worker claim; replay must not reserve another Agent or origin.
+    await fixture.restartApi();
     const replay = await fixture.request("POST", path, { body });
+    assert.equal(replay.status, 202, JSON.stringify(replay.body));
     assert.equal(replay.data.provisioning.workId, admitted.data.provisioning.workId);
+    assert.deepEqual(
+      (await provisioningRow(fixture.pool, namespace.id, body.requestId)).plan,
+      queued.plan,
+    );
     const changed = await fixture.request("POST", path, { body: { ...body, nativeAdmin: false } });
     assert.equal(
       changed.status,
@@ -6025,6 +6056,7 @@ test(
       return result.data.revisionId ? result.data : undefined;
     });
     await fixture.stopWorker();
+    assert.equal(status.agentId, queued.plan.reservedAgentId);
     const installation = await fixture.state.loadInstallation();
     const origin = `https://${deriveNativeAdminHost(installation.id, { id: status.agentId, namespaceId: namespace.id }, "agents.oce.localhost")}:9443`;
     const configuration = await fixture.request(
@@ -6048,6 +6080,7 @@ test(
     assert.equal(revisions.length, 1);
     assert.equal(nativeAdminConfigurationSupported(revisions[0], origin), true);
     // Replay after the worker handoff must still refer to the same Agent and first revision.
+    await fixture.restartApi();
     const completedReplay = await fixture.request("POST", path, { body });
     assert.equal(completedReplay.status, 202, JSON.stringify(completedReplay.body));
     assert.equal(completedReplay.data.provisioning.agentId, status.agentId);
