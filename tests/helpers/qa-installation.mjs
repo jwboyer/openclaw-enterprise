@@ -945,7 +945,7 @@ export async function createQaAgent(f, presetName, browserOrigin, nameSuffix = "
     // Exercise the Console's first-deployment request, without a later Configuration patch.
     const result = await f.api("POST", `/namespaces/${f.namespace.id}/agents/provision`, {
       ...rendered.agent,
-      requestId: randomUUID(),
+      requestId: `req_${randomUUID()}`,
       nativeAdmin: true,
       configuration: { ...rendered.configuration, kind: "agent" },
       harnessAuth: auth,
