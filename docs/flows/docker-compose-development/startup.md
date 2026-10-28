@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-10-28
-last_updated_session: authoring-run/fc103f5f-f130-4239-a879-78ed1d7e6602
+updated: 2026-10-29
+last_updated_session: authoring-run/cd588abb-6557-4867-b5d7-771efff137fc
 ---
 
 # Compose development startup
@@ -71,10 +71,9 @@ Engine and Compose JSON probes select Docker or Podman independently of a
 `docker` alias. Podman requires `yq` v4 and a Compose provider. Docker Compute
 requires standalone `podman-compose`, which `scripts/dev-up` pins and `occ dev
 down` matches so the stack is stopped with the provider that started it. The
-Kubernetes-profile Compose command that `occ dev up` and `occ dev down` drive
-prefers `docker-compose` — it passes `--project-directory`, which standalone
-`podman-compose` does not support — and falls back to `podman-compose` when
-`docker-compose` is absent. Rootful
+Kubernetes-profile startup prefers `docker-compose` and falls back to
+`podman-compose` when `docker-compose` is absent. It uses absolute paths without
+`--project-directory`; shutdown uses the Podman engine directly. Rootful
 Podman on Linux must expose its API socket (for example,
 `systemctl enable --now podman.socket`); startup resolves that socket and pins
 it as `DOCKER_HOST` for the provider. Explicit `-f FILE`, `-fFILE`, `-f=FILE`, `--file FILE`, or
@@ -279,7 +278,10 @@ Docker or Podman Compose call in a process group. It kills that group on
 cancellation and stops any remaining descendants after the command returns,
 including after success. `cmd/occ/main.go:main` receives Ctrl-C through
 `signal.NotifyContext`; context cancellation stops the isolated group.
-Unconfirmed termination preserves state without rollback.
+Unconfirmed termination preserves state without rollback. The
+`OCC_DEVELOPMENT_KEEP_ON_FAILURE` inspection option also keeps failed startup
+state and resources; [development settings](../../reference/settings/development.md)
+defines the cleanup procedure.
 `internal/occdev/command.go:composeServiceID` uses exact project/service labels.
 After both one-shot services succeed, startup creates k3d on the Compose network.
 With the default Sandbox profile, `OCC_DEVELOPMENT_K3S_IMAGE` selects the node
@@ -352,8 +354,9 @@ existing targets and reports removal failures with the original error.
 Shutdown validates recorded ownership, stops reconcilers, then removes owned
 k3d and Compose resources through the recorded engine. Podman uses exact project labels and direct removal, retrying while
 container dependencies disappear. It verifies container/volume/network absence;
-no dependency cascades or image pruning. Shutdown has five minutes; rollback has
-two. Cleanup retains failed state.
+no dependency cascades or image pruning. Both engines must also confirm the
+recorded k3d image volume is absent before discarding state. Shutdown, including
+that final check, has five minutes; rollback has two. Cleanup retains failed state.
 Success removes state and owned keys. External `--key-output` files remain
 operator-owned unless OpenShell readiness fails.
 
@@ -397,6 +400,10 @@ DNS/TLS, both Helm passes, recovery and destructive teardown.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-29 13:11: Reconcile provider selection, direct Podman cleanup, and failed-startup inspection after rebasing. (authoring-run/cd588abb-6557-4867-b5d7-771efff137fc - 8e4c719e88a794f489cac9998a8089e2ad985ddf)
+
+- 2026-10-28 09:29: Include final k3d image-volume verification in the shutdown deadline after rebasing cleanup. (authoring-run/02f5302f-15fe-45b7-9cc2-f196b6b6c574 - 680f45a414c5b5d840b6f42d449e5ebc56637a5d)
 
 - 2026-10-28 09:41: Normalize attached Podman file options for startup and cleanup, retaining file validation. (authoring-run/fc103f5f-f130-4239-a879-78ed1d7e6602 - 8eea685f0303ad004e222fc4399a019a9486dcb3)
 
